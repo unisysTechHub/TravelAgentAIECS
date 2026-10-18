@@ -21,21 +21,25 @@ locals {
     # AdminService        = { discovery_name = "admin-service", port = 8081, uses_mysql = true }
     # AthorizationService = { discovery_name = "athorization-service", port = 8090, uses_mysql = true }
     FlightMCPService = { discovery_name = "flight-service", port = 8081, uses_postgres = true }
-    HotelMCPService = { discovery_name = "hotel-service", port = 8082, uses_postgres = false }
+    HotelMCPService  = { discovery_name = "hotel-service", port = 8082, uses_postgres = false }
   }
 
   service_urls = {
     for service_key, service in local.microservices : service_key => "http://${service.discovery_name}.${local.service_discovery_namespace}:${service.port}"
+  }
+  shared_secret_arns = {
+    WEATHER_API_KEY = data.aws_secretsmanager_secret.weather_api_key.arn
+    OPENAI_API_KEY  = data.aws_secretsmanager_secret.openai_api_key.arn
   }
 
   # Inject only the service URLs each application is configured to consume.
   # UserService calls CoordinatorService; CoordinatorService calls TransactionService
   # and AccountService. The other services have no direct service URL dependencies.
   service_url_dependencies = {
-    TravelAgentService      = ["FlightMCPService", "HotelMCPService"]
-    FlightMCPService        = []
-    HotelMCPService = []
-   
+    TravelAgentService = ["FlightMCPService", "HotelMCPService"]
+    FlightMCPService   = []
+    HotelMCPService    = []
+
   }
 }
 
@@ -113,22 +117,27 @@ module "rds" {
 
 
 module "microservices" {
-  for_each = local.microservices
-  source   = "../terraform-ecs-microservices/modules/ecs-microservice"
+  for_each   = local.microservices
+  source     = "./modules/ecs-microservice"
   depends_on = [aws_iam_role_policy.ecs_read_postgres_credentials]
 
-  service_name          = each.key
-  discovery_name        = each.value.discovery_name
-target_group_arn = each.key == "TravelAgentService" ? module.alb.travel_agent_Alb_target_group_arn : null
-  image                 = var.microservice_images[each.key]
-  container_port        = each.value.port
-  database_url          = each.value.uses_postgres ? "jdbc:postgresql://${module.rds.rds_endpoint}:5432/${var.postgres_database_name}" : null
-  database_secret_arn   = each.value.uses_postgres ? module.rds.db_credentials_secret_arn : null
-  redis_environment =  {}
+  service_name     = each.key
+  discovery_name   = each.value.discovery_name
+  target_group_arn = each.key == "TravelAgentService" ? module.alb.travel_agent_Alb_target_group_arn : null
+  image            = var.microservice_images[each.key]
+  container_port   = each.value.port
+  container_health_check_command = contains(["FlightMCPService", "HotelMCPService"], each.key) ? [
+    "CMD-SHELL",
+    "curl -fsS -X POST http://127.0.0.1:${each.value.port}/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}' >/dev/null || exit 1"
+  ] : null
+  database_url        = each.value.uses_postgres ? "jdbc:postgresql://${module.rds.rds_endpoint}:5432/${var.postgres_database_name}" : null
+  database_secret_arn = each.value.uses_postgres ? module.rds.db_credentials_secret_arn : null
+  redis_environment   = {}
   service_urls = {
     for service_key in local.service_url_dependencies[each.key] :
     "DISCOVERY_${upper(replace(service_key, "Service", ""))}_SERVICE_URL" => local.service_urls[service_key]
   }
+  shared_secret_arns     = local.shared_secret_arns
   cluster_id             = module.ecs_cluster.cluster_id
   capacity_provider_name = module.ecs_cluster.capacity_provider_name
   execution_role_arn     = module.ecs_cluster.execution_role_arn
@@ -137,23 +146,35 @@ target_group_arn = each.key == "TravelAgentService" ? module.alb.travel_agent_Al
   namespace_id           = aws_service_discovery_private_dns_namespace.microservices.id
   aws_region             = var.aws_region
 
-  
+
 }
 
 # ECS retrieves these values through the task execution role when it starts the
-# container. Keep access limited to the PostgreSQL credentials secret.
+# container. Grant access only to the database and application secrets.
 resource "aws_iam_role_policy" "ecs_read_postgres_credentials" {
-  name = "read-postgres-credentials"
+  name = "read-task-secrets"
   role = module.ecs_cluster.execution_role_name
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = module.rds.db_credentials_secret_arn
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      Resource = [
+        module.rds.db_credentials_secret_arn,
+        data.aws_secretsmanager_secret.weather_api_key.arn,
+        data.aws_secretsmanager_secret.openai_api_key.arn,
+      ]
     }]
   })
+}
+
+data "aws_secretsmanager_secret" "weather_api_key" {
+  name = "banking-travel-dev/weather-api-key"
+}
+
+data "aws_secretsmanager_secret" "openai_api_key" {
+  name = "banking-travel-dev/openai-api-key"
 }
 
 module "ecs_cluster" {
