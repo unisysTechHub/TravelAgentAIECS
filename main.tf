@@ -67,6 +67,20 @@ resource "aws_security_group" "microservices" {
     self        = true
   }
 
+  ingress {
+    from_port       = local.microservices.TravelAgentService.port
+    to_port         = local.microservices.TravelAgentService.port
+    protocol        = "tcp"
+    security_groups = [module.alb.treavel_agent_alb_security_group_id]
+  }
+
+  ingress {
+    from_port       = local.microservices.FlightMCPService.port
+    to_port         = local.microservices.FlightMCPService.port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.flight_mcp_client.id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -75,16 +89,23 @@ resource "aws_security_group" "microservices" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "user_service_from_alb" {
-  security_group_id            = aws_security_group.microservices.id
-  referenced_security_group_id = module.alb.treavel_agent_alb_security_group_id
-  from_port                    = local.microservices.TravelAgentService.port
-  to_port                      = local.microservices.TravelAgentService.port
-  ip_protocol                  = "tcp"
-  description                  = "Allow the public ALB to reach UserService"
+# Managed with this stack so its ID is valid in the application VPC and its
+# lifecycle follows Terraform. Attach this group to any client ENIs that need
+# to call FlightMCPService.
+resource "aws_security_group" "flight_mcp_client" {
+  name        = "banking-travel-dev-flight-mcp-client"
+  description = "Clients allowed to call FlightMCPService"
+  vpc_id      = module.my_vpc.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
-resource "aws_vpc_security_group_egress_rule" "alb_to_user_service" {
+resource "aws_vpc_security_group_egress_rule" "alb_to_travel_agent_service" {
   security_group_id            = module.alb.treavel_agent_alb_security_group_id
   referenced_security_group_id = aws_security_group.microservices.id
   from_port                    = local.microservices.TravelAgentService.port
@@ -98,11 +119,12 @@ resource "aws_service_discovery_private_dns_namespace" "microservices" {
   vpc  = module.my_vpc.vpc_id
 }
 module "alb" {
-  source            = "./ALB"
-  name_prefix       = "banking-travel-dev"
-  vpc_id            = module.my_vpc.vpc_id
-  public_subnet_ids = module.my_vpc.public_subnet_ids
-  target_port       = 8080
+  source                       = "./ALB"
+  name_prefix                  = "banking-travel-dev"
+  vpc_id                       = module.my_vpc.vpc_id
+  public_subnet_ids            = module.my_vpc.public_subnet_ids
+  target_port                  = 8080
+  listener_allowed_client_cidr = var.alb_listener_allowed_client_cidr
 }
 module "rds" {
   source                          = "./Postgres"

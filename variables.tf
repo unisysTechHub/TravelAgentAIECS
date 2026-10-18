@@ -4,6 +4,12 @@ variable "aws_region" {
   default     = "ap-south-2"
 }
 
+variable "alb_listener_allowed_client_cidr" {
+  description = "CIDR allowed to reach the ALB HTTP listener on port 8080."
+  type        = string
+  default     = "106.192.28.232/32"
+}
+
 variable "frontend_image" {
   description = "Immutable ECR image URI for the frontend container."
   type        = string

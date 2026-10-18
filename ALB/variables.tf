@@ -8,6 +8,10 @@ variable "public_subnet_ids" {
   }
 }
 variable "target_port" { type = number }
+variable "listener_allowed_client_cidr" {
+  description = "CIDR allowed to reach the ALB listener on port 8080."
+  type        = string
+}
 variable "health_check_path" {
   type    = string
   default = "/healthz"
